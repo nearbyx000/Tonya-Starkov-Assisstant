@@ -3,7 +3,7 @@ import pyaudio
 import sys
 
 # --- КОНФИГУРАЦИЯ КЛИЕНТА ---
-SERVER_IP = '192.168.3.12' # <--- ВСТАВЬТЕ IP ВАШЕГО МОЩНОГО ПК
+SERVER_IP = '192.168.3.10' # <--- ВСТАВЬТЕ IP ВАШЕГО МОЩНОГО ПК
 SERVER_PORT = 5000
 INPUT_DEVICE_INDEX = 4     # Ваш индекс микрофона (pulse)
 
