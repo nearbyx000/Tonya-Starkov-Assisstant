@@ -13,7 +13,7 @@ PC_SERVER_PORT = 5000
 # Голос (можно менять). Варианты:
 # ru-RU-SvetlanaNeural (Женский, строгий)
 # ru-RU-DmitryNeural (Мужской, спокойный)
-VOICE = "ru-RU-SvetlanaNeural"
+VOICE = "ru-RU-DmitryNeural"
 
 # Настройки микрофона
 INPUT_DEVICE_INDEX = 4
