@@ -7,7 +7,7 @@ from openai import OpenAI
 
 # --- КОНФИГУРАЦИЯ ---
 # Путь к большой модели Vosk на ПК
-VOSK_MODEL_PATH = "vosk-model-ru-0.42"
+VOSK_MODEL_PATH = "vosk-model-ru-0.10"
 HOST = '0.0.0.0'
 PORT = 5000
 

@@ -6,7 +6,7 @@ from vosk import Model, KaldiRecognizer
 
 # --- КОНФИГУРАЦИЯ СЕРВЕРА ---
 # Путь к БОЛЬШОЙ модели на ПК
-MODEL_PATH = "vosk-model-ru-0.42" 
+MODEL_PATH = "vosk-model-ru-0.10" 
 HOST = '0.0.0.0'  # Слушать на всех интерфейсах
 PORT = 5000       # Порт для подключения
 
