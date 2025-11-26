@@ -5,14 +5,13 @@ import subprocess
 import sys
 import select
 import os
+import time  # Добавили библиотеку времени
 
 # --- КОНФИГУРАЦИЯ ---
 PC_SERVER_IP = "192.168.3.10"
 PC_SERVER_PORT = 5000
 
-# Голос (можно менять). Варианты:
-# ru-RU-SvetlanaNeural (Женский, строгий)
-# ru-RU-DmitryNeural (Мужской, спокойный)
+# Голос: ru-RU-DmitryNeural или ru-RU-SvetlanaNeural
 VOICE = "ru-RU-DmitryNeural"
 
 # Настройки микрофона
@@ -24,34 +23,25 @@ RATE = 16000
 
 def speak_text(text: str):
     """
-    Озвучивает текст через Edge-TTS (Online) + mpg123.
+    Озвучивает текст через Edge-TTS + mpg123.
     """
     if not text:
         return
     
     print(f"[TTS] Generating: {text}")
-    
-    # Файл для временного сохранения звука
     output_file = "/tmp/voice_response.mp3"
     
     try:
-        # 1. Генерируем аудио файл через Edge-TTS
-        # Используем subprocess для вызова команды терминала
         subprocess.run(
             ["edge-tts", "--text", text, "--voice", VOICE, "--write-media", output_file],
             check=True
         )
-        
-        # 2. Воспроизводим файл через mpg123
         subprocess.run(
-            ["mpg123", "-q", output_file], # -q чтобы не мусорил в логи
+            ["mpg123", "-q", output_file],
             check=True
         )
-        
-    except subprocess.CalledProcessError as e:
+    except Exception as e:
         print(f"[Error] TTS failed: {e}")
-    except FileNotFoundError:
-        print("[Error] 'edge-tts' or 'mpg123' not found. Install them first.")
 
 def main():
     print(f"[Init] Connecting to Server at {PC_SERVER_IP}:{PC_SERVER_PORT}...")
@@ -77,6 +67,7 @@ def main():
             return
         
         while True:
+            # 1. Читаем микрофон
             try:
                 data = stream.read(CHUNK, exception_on_overflow=False)
                 sock.sendall(data)
@@ -86,6 +77,7 @@ def main():
                 print("[Error] Connection lost.")
                 break
 
+            # 2. Проверяем входящие данные от сервера
             ready_to_read, _, _ = select.select([sock], [], [], 0.01)
             
             if ready_to_read:
@@ -97,15 +89,30 @@ def main():
                     text_answer = response_data.decode('utf-8')
                     print(f"[Server] Received: {text_answer}")
                     
-                    # Стоп микрофон
+                    # --- БЛОКИРОВКА СЛУХА НАЧАЛАСЬ ---
+                    
+                    # 1. Полностью останавливаем поток записи
                     stream.stop_stream()
                     
-                    # Озвучка (Online)
+                    # 2. Озвучиваем ответ
                     speak_text(text_answer)
                     
-                    # Старт микрофон
+                    # 3. Добавляем небольшую паузу (0.5 сек), чтобы эхо в комнате утихло
+                    time.sleep(0.5)
+                    
+                    # 4. Возобновляем поток
                     stream.start_stream()
-                    print("[Mic] Listening...")
+                    
+                    # 5. ВАЖНО: Очистка буфера (Flush)
+                    # Читаем и выбрасываем мусор, который мог попасть в буфер
+                    # пока мы включали микрофон. Сбрасываем примерно 1 секунду аудио.
+                    print("[Mic] Flushing buffer...")
+                    for _ in range(int(RATE / CHUNK * 1.0)):
+                        stream.read(CHUNK, exception_on_overflow=False)
+                    
+                    # --- БЛОКИРОВКА СЛУХА ЗАКОНЧИЛАСЬ ---
+                    
+                    print("[Mic] Listening again...")
                     
                 except BlockingIOError:
                     pass
