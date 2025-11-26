@@ -7,20 +7,16 @@ import select
 import os
 
 # --- КОНФИГУРАЦИЯ ---
-# IP-адрес вашего ПК (Сервера)
 PC_SERVER_IP = "192.168.3.10"
 PC_SERVER_PORT = 5000
 
-# Пути к файлам Piper
-# Путь к исполняемому файлу (бинарнику), который вы скачали
-PIPER_BINARY_PATH = "/home/pi/piper/piper"
-# Путь к файлу модели голоса (.onnx)
-PIPER_MODEL_PATH = "/home/pi/models/ru_RU-irina-medium.onnx"
+# Голос (можно менять). Варианты:
+# ru-RU-SvetlanaNeural (Женский, строгий)
+# ru-RU-DmitryNeural (Мужской, спокойный)
+VOICE = "ru-RU-SvetlanaNeural"
 
-# Настройки микрофона (Index 4 = PulseAudio, Index 10 = default)
+# Настройки микрофона
 INPUT_DEVICE_INDEX = 4
-
-# Аудио параметры
 CHUNK = 4000
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -28,32 +24,34 @@ RATE = 16000
 
 def speak_text(text: str):
     """
-    Озвучивает текст через Piper + aplay.
+    Озвучивает текст через Edge-TTS (Online) + mpg123.
     """
     if not text:
         return
     
-    print(f"[TTS] Processing: {text}")
+    print(f"[TTS] Generating: {text}")
     
-    # Проверка наличия бинарного файла piper
-    if not os.path.exists(PIPER_BINARY_PATH):
-        print(f"[Error] Piper binary not found at: {PIPER_BINARY_PATH}")
-        print("Please download piper_linux_aarch64.tar.gz and extract it to /home/pi/")
-        return
-
+    # Файл для временного сохранения звука
+    output_file = "/tmp/voice_response.mp3"
+    
     try:
-        # Используем полный путь к бинарному файлу piper
-        piper_cmd = [PIPER_BINARY_PATH, '--model', PIPER_MODEL_PATH, '--output-raw']
-        aplay_cmd = ['aplay', '-r', '22050', '-f', 'S16_LE', '-t', 'raw', '-']
+        # 1. Генерируем аудио файл через Edge-TTS
+        # Используем subprocess для вызова команды терминала
+        subprocess.run(
+            ["edge-tts", "--text", text, "--voice", VOICE, "--write-media", output_file],
+            check=True
+        )
         
-        p_piper = subprocess.Popen(piper_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-        p_aplay = subprocess.Popen(aplay_cmd, stdin=p_piper.stdout)
+        # 2. Воспроизводим файл через mpg123
+        subprocess.run(
+            ["mpg123", "-q", output_file], # -q чтобы не мусорил в логи
+            check=True
+        )
         
-        p_piper.communicate(input=text.encode('utf-8'))
-        p_aplay.wait()
-        
-    except Exception as e:
-        print(f"[Error] TTS execution failed: {e}")
+    except subprocess.CalledProcessError as e:
+        print(f"[Error] TTS failed: {e}")
+    except FileNotFoundError:
+        print("[Error] 'edge-tts' or 'mpg123' not found. Install them first.")
 
 def main():
     print(f"[Init] Connecting to Server at {PC_SERVER_IP}:{PC_SERVER_PORT}...")
@@ -75,21 +73,19 @@ def main():
                             input_device_index=INPUT_DEVICE_INDEX)
             print("[Mic] Microphone active. Streaming audio...")
         except Exception as e:
-            print(f"[Error] Failed to open microphone (Index {INPUT_DEVICE_INDEX}): {e}")
+            print(f"[Error] Failed to open microphone: {e}")
             return
         
         while True:
-            # 1. Чтение с микрофона и отправка на сервер
             try:
                 data = stream.read(CHUNK, exception_on_overflow=False)
                 sock.sendall(data)
             except IOError:
                 pass
             except BrokenPipeError:
-                print("[Error] Connection to server lost.")
+                print("[Error] Connection lost.")
                 break
 
-            # 2. Проверка входящих данных (текстовый ответ от сервера)
             ready_to_read, _, _ = select.select([sock], [], [], 0.01)
             
             if ready_to_read:
@@ -101,27 +97,23 @@ def main():
                     text_answer = response_data.decode('utf-8')
                     print(f"[Server] Received: {text_answer}")
                     
-                    # Приостановка микрофона, чтобы не слушать самого себя
+                    # Стоп микрофон
                     stream.stop_stream()
                     
-                    # Озвучивание ответа
+                    # Озвучка (Online)
                     speak_text(text_answer)
                     
-                    # Возобновление работы микрофона
+                    # Старт микрофон
                     stream.start_stream()
-                    print("[Mic] Listening again...")
+                    print("[Mic] Listening...")
                     
                 except BlockingIOError:
                     pass
                 except UnicodeDecodeError:
-                    print("[Error] Failed to decode server response")
+                    print("[Error] Decode error")
 
     except KeyboardInterrupt:
-        print("\n[Exit] User interrupted.")
-    except ConnectionRefusedError:
-        print(f"[Error] Could not connect to {PC_SERVER_IP}. Is the server running?")
-    except Exception as e:
-        print(f"[Error] Critical failure: {e}")
+        print("\n[Exit] Stopped.")
     finally:
         if 'stream' in locals():
             stream.stop_stream()
