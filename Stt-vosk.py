@@ -72,20 +72,32 @@ class VoiceRecognizer:
         self.stop()
 
 
+# --- 4. ОСНОВНОЙ ЦИКЛ ПРОГРАММЫ (Только распознавание) ---
+
 if __name__ == "__main__":
-    # Конфигурация
+    
+    # Конфигурация Vosk
     MODEL_PATH = "vosk-model-small-ru-0.22"
+    SAMPLE_RATE = 16000
     
     try:
-        with VoiceRecognizer(MODEL_PATH) as listener:
+        # Используем только VoiceRecognizer
+        with VoiceRecognizer(MODEL_PATH, SAMPLE_RATE) as listener:
             for text in listener.listen():
-                print(f"Recognized: {text}")
                 
-                if "стоп" in text.lower():
-                    print("Stop command received.")
+                # ЭТО ТОЧКА, ГДЕ РАСПОЗНАННЫЙ ТЕКСТ ГОТОВ
+                print(f"Распознано: {text}")
+                
+                # Здесь будет код для LLM
+                # Например: llm_response = send_to_llm(text)
+                #          print(llm_response)
+                
+                # Условие выхода из программы
+                if "выход" in text.lower() or "завершить" in text.lower():
+                    print("Команда завершения программы получена.")
                     break
                     
     except KeyboardInterrupt:
-        print("\nInterrupted by user.")
+        print("\nПрограмма прервана пользователем (Ctrl+C).")
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"Произошла критическая ошибка: {e}")
