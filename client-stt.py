@@ -9,42 +9,55 @@ import speech_recognition as sr
 # --- КОНФИГУРАЦИЯ ---
 SERVER_IP = "192.168.3.24"
 SERVER_PORT = 5000
+MIC_INDEX = 4  # PulseAudio
 
-# Используем PulseAudio (исходя из вашего скриншота check-mic)
-MIC_INDEX = 4 
-
+# Сменили голос на Светлану (более стабильный API)
+TTS_VOICE = "ru-RU-SvetlanaNeural" 
 TTS_OUTPUT_FILE = "response.mp3"
-TTS_VOICE = "ru-RU-DmitryNeural"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 
 class VoiceClient:
     def __init__(self):
         self.recognizer = sr.Recognizer()
-        # Чувствительность. Если микрофон ловит шум как "попа", увеличивайте это число (до 3000-4000)
-        self.recognizer.energy_threshold = 1000 
-        self.recognizer.dynamic_energy_threshold = True
-        self.recognizer.pause_threshold = 1.0 # Ждать 1 сек тишины перед отправкой
+        # ПОДНЯЛИ ПОРОГ: Теперь микрофон не будет реагировать на шорохи и шум
+        self.recognizer.energy_threshold = 3000 
+        self.recognizer.dynamic_energy_threshold = False # Откл автоподстройку, чтобы не ловил тишину
+        self.recognizer.pause_threshold = 1.0
 
     def _play_audio(self):
         if not os.path.exists(TTS_OUTPUT_FILE):
-            logging.error("Файл озвучки не найден!")
+            logging.error("Файл аудио не создан (ошибка TTS)")
             return
         
-        logging.info("Воспроизведение звука...")
         try:
-            # Используем mpg123 с явным указанием PulseAudio (иногда помогает -a)
-            # Если не будет звука, уберите '-o', 'pulse'
+            # -q : тихий режим
             subprocess.run(["mpg123", "-q", TTS_OUTPUT_FILE], check=True)
         except Exception as e:
-            logging.error(f"Ошибка воспроизведения: {e}")
+            logging.error(f"Ошибка плеера: {e}")
+
+    def _generate_tts(self, text: str):
+        # Удаляем старый файл
+        if os.path.exists(TTS_OUTPUT_FILE):
+            os.remove(TTS_OUTPUT_FILE)
+
+        cmd = [
+            "edge-tts",
+            "--text", text,
+            "--voice", TTS_VOICE,
+            "--write-media", TTS_OUTPUT_FILE
+        ]
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Ошибка Edge-TTS: Возможно, проблемы с интернетом или API Microsoft.")
 
     def _connect(self) -> socket.socket:
         while True:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.connect((SERVER_IP, SERVER_PORT))
-                logging.info(f"Успешное подключение к {SERVER_IP}")
+                logging.info(f"Подключено к {SERVER_IP}")
                 return sock
             except OSError:
                 time.sleep(3)
@@ -61,20 +74,18 @@ class VoiceClient:
     def run(self):
         sock = self._connect()
         try:
-            # Явно указываем микрофон
             source = sr.Microphone(device_index=MIC_INDEX)
-            
             with source:
-                logging.info("Калибровка шума (помолчите 2 сек)...")
-                self.recognizer.adjust_for_ambient_noise(source, duration=2)
-                logging.info(f"Готов! Слушаю через устройство {MIC_INDEX}...")
+                logging.info("Калибровка... (Тишина)")
+                self.recognizer.adjust_for_ambient_noise(source, duration=1)
+                logging.info("Готов. Говорите громко и четко.")
                 
                 while True:
                     try:
                         # Слушаем
                         audio = self.recognizer.listen(source, timeout=None)
                         wav_data = audio.get_wav_data()
-                        logging.info(f"Записано {len(wav_data)} байт. Отправка...")
+                        logging.info("Фраза записана. Отправка...")
 
                         # Отправка
                         sock.sendall(struct.pack('!I', len(wav_data)))
@@ -88,28 +99,25 @@ class VoiceClient:
                             # Прием текста
                             data = self._recv_exact(sock, resp_len)
                             text = data.decode('utf-8')
-                            logging.info(f"Ответ сервера: {text}")
+                            logging.info(f"Ответ: {text}")
 
-                            # Генерация TTS
-                            cmd = ["edge-tts", "--text", text, "--voice", TTS_VOICE, "--write-media", TTS_OUTPUT_FILE]
-                            subprocess.run(cmd, stdout=subprocess.DEVNULL, check=True)
-                            
-                            # Воспроизведение
+                            # Озвучка
+                            self._generate_tts(text)
                             self._play_audio()
-                            logging.info("Слушаю снова...")
+                            
+                            logging.info("Жду следующую фразу...")
                         else:
-                            logging.info("Сервер прислал пустой ответ (игнорирую).")
-                        
+                            logging.info("Пустой ответ (шум).")
+
                     except (BrokenPipeError, ConnectionResetError):
-                        logging.warning("Связь потеряна. Реконнект...")
+                        logging.warning("Реконнект...")
                         sock.close()
                         sock = self._connect()
                     except Exception as e:
-                        logging.error(f"Ошибка цикла: {e}")
+                        logging.error(f"Сбой цикла: {e}")
                         time.sleep(1)
         except OSError as e:
-            logging.error(f"Ошибка микрофона: {e}")
-            logging.error("Попробуйте изменить MIC_INDEX на 10 (default)")
+            logging.error(f"Ошибка инициализации микрофона: {e}")
 
 if __name__ == "__main__":
     try:
