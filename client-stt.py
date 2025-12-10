@@ -8,7 +8,7 @@ import speech_recognition as sr
 import pygame
 
 # Configuration
-SERVER_IP = "192.168.3.10"
+SERVER_IP = "192.168.3.24"
 SERVER_PORT = 5000
 MIC_INDEX = 4
 TTS_VOICE = "ru-RU-DmitryNeural"

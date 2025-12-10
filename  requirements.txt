@@ -1,8 +1,0 @@
-vosk
-pyaudio
-openai
-python-dotenv
-requests
-numpy
-opencv-python
-
