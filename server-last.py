@@ -3,11 +3,10 @@ import struct
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List, Dict
 from faster_whisper import WhisperModel
 from openai import OpenAI
 
-# --- Configuration ---
 @dataclass(frozen=True)
 class Config:
     HOST: str = "0.0.0.0"
@@ -26,7 +25,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
-# --- AI Engine ---
 class InferenceEngine:
     _instance = None
 
@@ -44,7 +42,8 @@ class InferenceEngine:
             compute_type=Config.WHISPER_TYPE
         )
         self.llm = OpenAI(base_url=Config.LLM_URL, api_key=Config.LLM_KEY)
-        self.history = [{"role": "system", "content": "Ты Джарвис. Отвечай кратко и емко на русском."}]
+        # History is initialized empty. System prompt is managed via LM Studio settings.
+        self.history: List[Dict[str, str]] = []
         logging.info("Engine ready.")
 
     def transcribe(self, audio_bytes: bytes) -> str:
@@ -62,25 +61,23 @@ class InferenceEngine:
     def query_llm(self, text: str) -> str:
         self.history.append({"role": "user", "content": text})
         
-        # Keep context window efficient
-        if len(self.history) > Config.HISTORY_LIMIT + 1:
-            self.history = [self.history[0]] + self.history[-Config.HISTORY_LIMIT:]
+        if len(self.history) > Config.HISTORY_LIMIT:
+            self.history = self.history[-Config.HISTORY_LIMIT:]
 
         try:
             completion = self.llm.chat.completions.create(
                 model="local-model",
                 messages=self.history,
                 temperature=0.7,
-                max_tokens=256
+                max_tokens=300
             )
             response = completion.choices[0].message.content
             self.history.append({"role": "assistant", "content": response})
             return response
         except Exception as e:
             logging.error(f"LLM request failed: {e}")
-            return "Ошибка обработки данных."
+            return "Ошибка обработки запроса."
 
-# --- Network Handler ---
 class VoiceRequestHandler(socketserver.BaseRequestHandler):
     def handle(self):
         client_addr = self.client_address[0]
@@ -103,7 +100,6 @@ class VoiceRequestHandler(socketserver.BaseRequestHandler):
                 if not audio_data:
                     break
 
-                # Process
                 text = engine.transcribe(audio_data)
                 logging.info(f"[{client_addr}] STT: {text}")
 
@@ -112,7 +108,6 @@ class VoiceRequestHandler(socketserver.BaseRequestHandler):
                     response_text = engine.query_llm(text)
                     logging.info(f"[{client_addr}] LLM: {response_text}")
 
-                # Send Response
                 encoded = response_text.encode('utf-8')
                 self.request.sendall(struct.pack('!I', len(encoded)))
                 self.request.sendall(encoded)
@@ -137,15 +132,11 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-# --- Main Entry Point ---
 if __name__ == "__main__":
-    # Pre-load models before binding port
-    InferenceEngine()
-    
+    InferenceEngine() # Pre-load models
     with ThreadedTCPServer((Config.HOST, Config.PORT), VoiceRequestHandler) as server:
         logging.info(f"Server running on {Config.HOST}:{Config.PORT}")
         try:
             server.serve_forever()
         except KeyboardInterrupt:
-            logging.info("Shutting down...")
             server.shutdown()
