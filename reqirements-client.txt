@@ -2,3 +2,6 @@ SpeechRecognition
 edge-tts
 pygame
 PyAudio
+noisereduce
+webrtcvad-wheels
+scipy
