@@ -6,33 +6,33 @@ import whisper
 from openai import OpenAI
 from datetime import datetime
 
-# --- CONFIGURATION ---
 HOST = "0.0.0.0"
 PORT = 5000
 WHISPER_MODEL = "base"
-# Вставьте ключ ниже, если он не задан в переменных среды
-OPENAI_API_KEY = "sk-..."
-
-# Аудио параметры (должны совпадать с клиентом!)
+LM_STUDIO_URL = "http://localhost:1234/v1"
+LM_STUDIO_API_KEY = "lm-studio"
 SAMPLE_RATE = 16000
 CHANNELS = 1
-SAMPLE_WIDTH = 2  # 2 байта = 16 бит
-
-SYSTEM_PROMPT = "Ты — голосовой ассистент Тоня. Отвечай кратко, по делу и с легким сарказмом."
+SAMPLE_WIDTH = 2
+SYSTEM_PROMPT = "Ты — голосовой ассистент Тоня. Отвечай на русском языке. Будь кратка и саркастична."
 
 
 class AIBackend:
     def __init__(self):
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Загрузка модели Whisper ({WHISPER_MODEL})...")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Loading Whisper ({WHISPER_MODEL})...")
         self.whisper_model = whisper.load_model(WHISPER_MODEL)
-        self.gpt_client = OpenAI(api_key=OPENAI_API_KEY)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] AI Backend готов.")
+
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Connecting to LM Studio ({LM_STUDIO_URL})...")
+        self.gpt_client = OpenAI(
+            base_url=LM_STUDIO_URL,
+            api_key=LM_STUDIO_API_KEY
+        )
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] AI Backend ready.")
 
     def transcribe(self, audio_path):
         try:
-            result = self.whisper_model.transcribe(audio_path, fp16=False)
-            text = result.get("text", "").strip()
-            return text
+            result = self.whisper_model.transcribe(audio_path, fp16=False, language='ru')
+            return result.get("text", "").strip()
         except Exception as e:
             print(f"[ERROR] Whisper failed: {e}")
             return None
@@ -40,18 +40,18 @@ class AIBackend:
     def ask_gpt(self, text):
         try:
             response = self.gpt_client.chat.completions.create(
-                model="gpt-4",
+                model="local-model",
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": text}
                 ],
-                max_tokens=200,
-                temperature=0.7
+                temperature=0.7,
+                max_tokens=200
             )
             return response.choices[0].message.content
         except Exception as e:
-            print(f"[ERROR] OpenAI API failed: {e}")
-            return "Произошла ошибка при обращении к серверу."
+            print(f"[ERROR] LM Studio connection failed: {e}")
+            return "Ошибка связи с локальной нейросетью."
 
 
 class VoiceServer:
@@ -71,25 +71,22 @@ class VoiceServer:
         return data
 
     def run(self):
-        print(f"Сервер запущен на {HOST}:{PORT}")
+        print(f"Server running on {HOST}:{PORT}")
 
         while True:
             conn, addr = self.sock.accept()
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Подключение: {addr[0]}")
+            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Connected: {addr[0]}")
 
             try:
-                # 1. Получаем размер данных
                 len_bytes = self._recv_exact(conn, 4)
                 if not len_bytes: continue
 
                 payload_size = struct.unpack('>I', len_bytes)[0]
-                print(f"Прием {payload_size} байт аудио...")
+                print(f"Receiving {payload_size} bytes...")
 
-                # 2. Получаем само аудио (RAW PCM)
                 audio_data = self._recv_exact(conn, payload_size)
                 if not audio_data: continue
 
-                # 3. Сохраняем как валидный WAV
                 temp_file = "temp_input.wav"
                 with wave.open(temp_file, "wb") as wf:
                     wf.setnchannels(CHANNELS)
@@ -97,29 +94,25 @@ class VoiceServer:
                     wf.setframerate(SAMPLE_RATE)
                     wf.writeframes(audio_data)
 
-                # 4. Распознавание
                 transcript = self.ai.transcribe(temp_file)
                 if not transcript:
-                    print("Пустая транскрипция.")
-                    self._send_response(conn, "Не удалось распознать речь.")
+                    print("Empty transcript.")
+                    self._send_response(conn, "Не расслышала.")
                     continue
 
-                print(f"Запрос: {transcript}")
+                print(f"Query: {transcript}")
 
-                # Команда выхода (опционально)
                 if "выключись" in transcript.lower():
                     self._send_response(conn, "Отключаюсь.")
                     break
 
-                # 5. GPT
                 response_text = self.ai.ask_gpt(transcript)
-                print(f"Ответ: {response_text}")
+                print(f"Response: {response_text}")
 
-                # 6. Отправка ответа
                 self._send_response(conn, response_text)
 
             except Exception as e:
-                print(f"[ERROR] Loop error: {e}")
+                print(f"[ERROR] Processing loop: {e}")
             finally:
                 conn.close()
                 if os.path.exists("temp_input.wav"):
@@ -137,5 +130,8 @@ class VoiceServer:
 
 
 if __name__ == "__main__":
-    backend = AIBackend()
-    VoiceServer(backend).run()
+    try:
+        backend = AIBackend()
+        VoiceServer(backend).run()
+    except KeyboardInterrupt:
+        print("\nServer stopped.")
