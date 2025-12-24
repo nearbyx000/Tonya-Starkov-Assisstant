@@ -2,6 +2,7 @@ import socket
 import asyncio
 import subprocess
 import time
+import os
 import contextlib
 import numpy as np
 import pyaudio
@@ -18,14 +19,13 @@ CONFIG = {
     'RATE': 16000,
     'CHUNK': 1024,
     'DURATION': 5,
-    'VAD_LEVEL': 2,  # 0-3
+    'VAD_LEVEL': 2,
     'HP_FREQ': 300
 }
 
 
 @contextlib.contextmanager
 def ignore_alsa_warnings():
-    """Suppresses low-level ALSA driver warnings."""
     handler = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)(lambda *args: None)
     asound = cdll.LoadLibrary('libasound.so.2')
     asound.snd_lib_error_set_handler(handler)
@@ -41,30 +41,22 @@ class AudioProcessor:
 
     def clean(self, raw_bytes):
         audio = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-
-        # Normalize and Filter
         if (max_val := np.max(np.abs(audio))) > 0:
             audio /= max_val
         audio = signal.sosfilt(self.sos, audio)
-
-        # Noise Reduction
         try:
             audio = nr.reduce_noise(y=audio, sr=self.rate, stationary=True, prop_decrease=0.75, n_fft=1024)
         except Exception:
             pass
-
         return self._extract_speech(audio)
 
     def _extract_speech(self, audio):
-        frame_size = int(self.rate * 0.03)  # 30ms window
+        frame_size = int(self.rate * 0.03)
         frames = []
-
         for i in range(0, len(audio) - frame_size, frame_size):
             chunk = audio[i:i + frame_size]
-            # VAD requires int16
             if self.vad.is_speech((chunk * 32767).astype(np.int16).tobytes(), self.rate):
                 frames.append(chunk)
-
         result = np.concatenate(frames) if frames else audio
         return (result * 32767).astype(np.int16).tobytes()
 
@@ -77,7 +69,6 @@ class VoiceClient:
         self.device_idx = self._find_mic()
 
     def _find_mic(self):
-        """Auto-detect USB mic or fallback to default."""
         for i in range(self.pa.get_host_api_info_by_index(0)['deviceCount']):
             dev = self.pa.get_device_info_by_index(i)
             if dev['maxInputChannels'] > 0 and 'USB' in dev['name']:
@@ -100,7 +91,7 @@ class VoiceClient:
             print("Done.")
             return self.processor.clean(b''.join(frames))
         except OSError:
-            print("\n[Error] Audio device failure. Reinitializing...")
+            print("\n[Error] Mic error. Reinitializing...")
             self.device_idx = self._find_mic()
             return None
 
@@ -118,9 +109,18 @@ class VoiceClient:
     async def speak(self, text):
         if not text: return
         print(f">>> {text}")
+        output_file = "response.mp3"
         try:
-            await edge_tts.Communicate(text, CONFIG['VOICE']).save("response.mp3")
-            subprocess.run(['mpg123', '-q', 'response.mp3'], check=False)
+            # Generate MP3
+            communicate = edge_tts.Communicate(text, CONFIG['VOICE'])
+            await communicate.save(output_file)
+
+            # Play MP3 if generation succeeded
+            if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+                subprocess.run(['mpg123', '-q', output_file], check=False)
+            else:
+                print("[TTS] Error: File generation failed.")
+
         except Exception as e:
             print(f"[TTS] Error: {e}")
 

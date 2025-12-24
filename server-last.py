@@ -1,137 +1,80 @@
-import socket
-import struct
 import os
-import wave
-import whisper
-from openai import OpenAI
-from datetime import datetime
+import sys
+import pyaudio
+import contextlib
+from ctypes import *
 
-HOST = "0.0.0.0"
-PORT = 5000
-WHISPER_MODEL = "base"
-LM_STUDIO_URL = "http://localhost:1234/v1"
-LM_STUDIO_API_KEY = "lm-studio"
-SAMPLE_RATE = 16000
+# Константы конфигурации
+CHUNK = 1024
+FORMAT = pyaudio.paInt16
 CHANNELS = 1
-SAMPLE_WIDTH = 2
-SYSTEM_PROMPT = "Ты — голосовой ассистент Тоня. Отвечай на русском языке. Будь кратка и саркастична."
+RATE = 44100  # Или 48000, 16000 в зависимости от микрофона
+
+# Обработчик ошибок для подавления вывода ALSA lib
+ERROR_HANDLER_FUNC = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)
 
 
-class AIBackend:
-    def __init__(self):
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Loading Whisper ({WHISPER_MODEL})...")
-        self.whisper_model = whisper.load_model(WHISPER_MODEL)
-
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Connecting to LM Studio ({LM_STUDIO_URL})...")
-        self.gpt_client = OpenAI(
-            base_url=LM_STUDIO_URL,
-            api_key=LM_STUDIO_API_KEY
-        )
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] AI Backend ready.")
-
-    def transcribe(self, audio_path):
-        try:
-            result = self.whisper_model.transcribe(audio_path, fp16=False, language='ru')
-            return result.get("text", "").strip()
-        except Exception as e:
-            print(f"[ERROR] Whisper failed: {e}")
-            return None
-
-    def ask_gpt(self, text):
-        try:
-            response = self.gpt_client.chat.completions.create(
-                model="local-model",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": text}
-                ],
-                temperature=0.7,
-                max_tokens=200
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            print(f"[ERROR] LM Studio connection failed: {e}")
-            return "Ошибка связи с локальной нейросетью."
+def py_error_handler(filename, line, function, err, fmt):
+    pass
 
 
-class VoiceServer:
-    def __init__(self, ai_backend):
-        self.ai = ai_backend
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind((HOST, PORT))
-        self.sock.listen(1)
+c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
 
-    def _recv_exact(self, conn, n):
-        data = b''
-        while len(data) < n:
-            packet = conn.recv(n - len(data))
-            if not packet: return None
-            data += packet
-        return data
 
-    def run(self):
-        print(f"Server running on {HOST}:{PORT}")
+@contextlib.contextmanager
+def no_alsa_error():
+    """Подавляет спам ошибок ALSA/Jack в stderr."""
+    asound = cdll.LoadLibrary('libasound.so.2')
+    asound.snd_lib_error_set_handler(c_error_handler)
+    yield
+    asound.snd_lib_error_set_handler(None)
 
-        while True:
-            conn, addr = self.sock.accept()
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Connected: {addr[0]}")
 
-            try:
-                len_bytes = self._recv_exact(conn, 4)
-                if not len_bytes: continue
+def get_input_device_index(p: pyaudio.PyAudio):
+    """Находит первый доступный USB-микрофон или возвращает default."""
+    info = p.get_host_api_info_by_index(0)
+    num_devices = info.get('deviceCount')
 
-                payload_size = struct.unpack('>I', len_bytes)[0]
-                print(f"Receiving {payload_size} bytes...")
+    # Приоритет USB устройствам
+    for i in range(num_devices):
+        dev = p.get_device_info_by_index(i)
+        if dev.get('maxInputChannels') > 0:
+            if 'USB' in dev.get('name'):
+                return i
 
-                audio_data = self._recv_exact(conn, payload_size)
-                if not audio_data: continue
+    # Fallback на системный дефолт, если USB не найден
+    return p.get_default_input_device_info()['index']
 
-                temp_file = "temp_input.wav"
-                with wave.open(temp_file, "wb") as wf:
-                    wf.setnchannels(CHANNELS)
-                    wf.setsampwidth(SAMPLE_WIDTH)
-                    wf.setframerate(SAMPLE_RATE)
-                    wf.writeframes(audio_data)
 
-                transcript = self.ai.transcribe(temp_file)
-                if not transcript:
-                    print("Empty transcript.")
-                    self._send_response(conn, "Не расслышала.")
-                    continue
+def main():
+    with no_alsa_error():
+        p = pyaudio.PyAudio()
 
-                print(f"Query: {transcript}")
+    try:
+        dev_index = get_input_device_index(p)
+        print(f"[INFO] Selected Input Device Index: {dev_index}")
 
-                if "выключись" in transcript.lower():
-                    self._send_response(conn, "Отключаюсь.")
-                    break
+        stream = p.open(format=FORMAT,
+                        channels=CHANNELS,
+                        rate=RATE,
+                        input=True,
+                        input_device_index=dev_index,
+                        frames_per_buffer=CHUNK)
 
-                response_text = self.ai.ask_gpt(transcript)
-                print(f"Response: {response_text}")
+        print("[INFO] Stream started successfully. Recording...")
 
-                self._send_response(conn, response_text)
+        # Логика обработки звука
+        # while True:
+        #    data = stream.read(CHUNK, exception_on_overflow=False)
 
-            except Exception as e:
-                print(f"[ERROR] Processing loop: {e}")
-            finally:
-                conn.close()
-                if os.path.exists("temp_input.wav"):
-                    try:
-                        os.remove("temp_input.wav")
-                    except:
-                        pass
-
-    def _send_response(self, conn, text):
-        data = text.encode('utf-8')
-        try:
-            conn.sendall(struct.pack('>I', len(data)) + data)
-        except Exception as e:
-            print(f"[ERROR] Send failed: {e}")
+    except Exception as e:
+        print(f"[ERROR] Init failed: {e}")
+    finally:
+        if 'stream' in locals():
+            stream.stop_stream()
+            stream.close()
+        p.terminate()
 
 
 if __name__ == "__main__":
-    try:
-        backend = AIBackend()
-        VoiceServer(backend).run()
-    except KeyboardInterrupt:
-        print("\nServer stopped.")
+    main()
