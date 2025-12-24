@@ -1,20 +1,27 @@
 #!/bin/bash
 
 # Configuration
-SERVER_IP="192.168.3.115"
+SERVER_IP="100.0.0.2"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Wait for Network & Server
-echo "Waiting for server at $SERVER_IP..."
+# --- HARDWARE INIT ---
+echo "Initializing Robot Hardware..."
+# Hardware commands added here:
+mbctl daemon start
+mbctl chip start
+sleep 5
+
+# --- NETWORK WAIT ---
+echo "Waiting for Server ($SERVER_IP)..."
 while ! ping -c 1 -W 1 $SERVER_IP > /dev/null; do
     sleep 2
 done
 
-# Run Client (Auto-restart on crash)
+# --- CLIENT LOOP ---
 cd "$DIR"
 while true; do
-    echo "Starting Client..."
+    echo "Starting Tonya Client..."
     python3 client.py
-    echo "Client crashed/stopped. Restarting in 3s..."
+    echo "Client stopped. Restarting in 3s..."
     sleep 3
 done
