@@ -1,80 +1,158 @@
+import socket
+import struct
 import os
-import sys
-import pyaudio
-import contextlib
-from ctypes import *
+import wave
+import whisper
+from openai import OpenAI
+from datetime import datetime
 
-# Константы конфигурации
-CHUNK = 1024
-FORMAT = pyaudio.paInt16
+HOST = "0.0.0.0"
+PORT = 5000
+WHISPER_MODEL = "base"
+LM_STUDIO_URL = "http://localhost:1234/v1"
+LM_STUDIO_API_KEY = "lm-studio"
+SAMPLE_RATE = 16000
 CHANNELS = 1
-RATE = 44100  # Или 48000, 16000 в зависимости от микрофона
+SAMPLE_WIDTH = 2
 
-# Обработчик ошибок для подавления вывода ALSA lib
-ERROR_HANDLER_FUNC = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)
+# Integrated TTS-optimized prompt with Russian language enforcement
+SYSTEM_PROMPT = """
+Role: Helpful AI assistant that writes clear text which is later converted to speech.
 
+Assistant Behaviors for Text-first TTS:
+- Answer First: Start with a tight 1–2 sentence summary, then expand in short paragraphs.
+- Sentence Design: Keep sentences concise; prefer simple punctuation; avoid nested clauses.
+- Readability for Audio: Expand abbreviations on first use; write numbers and dates in full words when clarity matters.
+- URLs & Names: Refer to links as “link to [site/title]” instead of full URLs; spell rare names or terms once in parentheses.
+- Emphasis in Text: Highlight one key takeaway per section with minimal formatting that TTS will convey naturally.
+- Accessibility: Describe any visuals; define specialized terms briefly on first mention.
+- Boundaries: Don’t invent facts or links; present alternatives if uncertain; end cleanly after delivering the content without follow-ups.
 
-def py_error_handler(filename, line, function, err, fmt):
-    pass
-
-
-c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
-
-
-@contextlib.contextmanager
-def no_alsa_error():
-    """Подавляет спам ошибок ALSA/Jack в stderr."""
-    asound = cdll.LoadLibrary('libasound.so.2')
-    asound.snd_lib_error_set_handler(c_error_handler)
-    yield
-    asound.snd_lib_error_set_handler(None)
+CRITICAL INSTRUCTION: You are Tonya. You MUST provide all responses in RUSSIAN language only.
+"""
 
 
-def get_input_device_index(p: pyaudio.PyAudio):
-    """Находит первый доступный USB-микрофон или возвращает default."""
-    info = p.get_host_api_info_by_index(0)
-    num_devices = info.get('deviceCount')
+class AIBackend:
+    def __init__(self):
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Loading Whisper ({WHISPER_MODEL})...")
+        self.whisper_model = whisper.load_model(WHISPER_MODEL)
 
-    # Приоритет USB устройствам
-    for i in range(num_devices):
-        dev = p.get_device_info_by_index(i)
-        if dev.get('maxInputChannels') > 0:
-            if 'USB' in dev.get('name'):
-                return i
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Connecting to LM Studio ({LM_STUDIO_URL})...")
+        self.gpt_client = OpenAI(base_url=LM_STUDIO_URL, api_key=LM_STUDIO_API_KEY)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] AI Backend ready.")
 
-    # Fallback на системный дефолт, если USB не найден
-    return p.get_default_input_device_info()['index']
+    def transcribe(self, audio_path):
+        try:
+            # Force Russian language for accuracy
+            result = self.whisper_model.transcribe(
+                audio_path,
+                fp16=False,
+                language='ru',
+                task='transcribe'
+            )
+            return result.get("text", "").strip()
+        except Exception as e:
+            print(f"[ERROR] Whisper failed: {e}")
+            return None
+
+    def ask_gpt(self, text):
+        try:
+            response = self.gpt_client.chat.completions.create(
+                model="local-model",
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": text}
+                ],
+                temperature=0.7,
+                max_tokens=300
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"[ERROR] LM Studio error: {e}")
+            return "Ошибка связи с нейросетью."
 
 
-def main():
-    with no_alsa_error():
-        p = pyaudio.PyAudio()
+class VoiceServer:
+    def __init__(self, ai_backend):
+        self.ai = ai_backend
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind((HOST, PORT))
+        self.sock.listen(1)
 
-    try:
-        dev_index = get_input_device_index(p)
-        print(f"[INFO] Selected Input Device Index: {dev_index}")
+    def _recv_exact(self, conn, n):
+        data = b''
+        while len(data) < n:
+            packet = conn.recv(n - len(data))
+            if not packet: return None
+            data += packet
+        return data
 
-        stream = p.open(format=FORMAT,
-                        channels=CHANNELS,
-                        rate=RATE,
-                        input=True,
-                        input_device_index=dev_index,
-                        frames_per_buffer=CHUNK)
+    def run(self):
+        print(f"Server running on {HOST}:{PORT}")
 
-        print("[INFO] Stream started successfully. Recording...")
+        while True:
+            conn, addr = self.sock.accept()
+            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Connected: {addr[0]}")
 
-        # Логика обработки звука
-        # while True:
-        #    data = stream.read(CHUNK, exception_on_overflow=False)
+            try:
+                # 1. Receive Size
+                len_bytes = self._recv_exact(conn, 4)
+                if not len_bytes: continue
+                payload_size = struct.unpack('>I', len_bytes)[0]
+                print(f"Receiving {payload_size} bytes...")
 
-    except Exception as e:
-        print(f"[ERROR] Init failed: {e}")
-    finally:
-        if 'stream' in locals():
-            stream.stop_stream()
-            stream.close()
-        p.terminate()
+                # 2. Receive Audio
+                audio_data = self._recv_exact(conn, payload_size)
+                if not audio_data: continue
+
+                # 3. Save WAV
+                temp_file = "temp_input.wav"
+                with wave.open(temp_file, "wb") as wf:
+                    wf.setnchannels(CHANNELS)
+                    wf.setsampwidth(SAMPLE_WIDTH)
+                    wf.setframerate(SAMPLE_RATE)
+                    wf.writeframes(audio_data)
+
+                # 4. Transcribe (Russian forced)
+                transcript = self.ai.transcribe(temp_file)
+                if not transcript:
+                    self._send_response(conn, "...")
+                    continue
+
+                print(f"Query: {transcript}")
+
+                if "выключись" in transcript.lower():
+                    self._send_response(conn, "Отключаюсь.")
+                    break
+
+                # 5. Generate Response
+                response_text = self.ai.ask_gpt(transcript)
+                print(f"Response: {response_text}")
+
+                self._send_response(conn, response_text)
+
+            except Exception as e:
+                print(f"[ERROR] Processing loop: {e}")
+            finally:
+                conn.close()
+                if os.path.exists("temp_input.wav"):
+                    try:
+                        os.remove("temp_input.wav")
+                    except:
+                        pass
+
+    def _send_response(self, conn, text):
+        data = text.encode('utf-8')
+        try:
+            conn.sendall(struct.pack('>I', len(data)) + data)
+        except Exception as e:
+            print(f"[ERROR] Send failed: {e}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        backend = AIBackend()
+        VoiceServer(backend).run()
+    except KeyboardInterrupt:
+        print("\nServer stopped.")
