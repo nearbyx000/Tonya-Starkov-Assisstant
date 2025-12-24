@@ -15,7 +15,7 @@ SAMPLE_RATE = 16000
 CHANNELS = 1
 SAMPLE_WIDTH = 2
 
-# Integrated TTS-optimized prompt with Russian language enforcement
+
 SYSTEM_PROMPT = """
 Role: Helpful AI assistant that writes clear text which is later converted to speech.
 
@@ -28,7 +28,7 @@ Assistant Behaviors for Text-first TTS:
 - Accessibility: Describe any visuals; define specialized terms briefly on first mention.
 - Boundaries: Don’t invent facts or links; present alternatives if uncertain; end cleanly after delivering the content without follow-ups.
 
-CRITICAL INSTRUCTION: You are Tonya. You MUST provide all responses in RUSSIAN language only.
+CRITICAL INSTRUCTION: The user will speak in Russian. You MUST provide the final response in RUSSIAN language ONLY.
 """
 
 
@@ -43,12 +43,11 @@ class AIBackend:
 
     def transcribe(self, audio_path):
         try:
-            # Force Russian language for accuracy
+            # Force Russian transcription
             result = self.whisper_model.transcribe(
                 audio_path,
                 fp16=False,
-                language='ru',
-                task='transcribe'
+                language='ru'
             )
             return result.get("text", "").strip()
         except Exception as e:
@@ -96,17 +95,14 @@ class VoiceServer:
             print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Connected: {addr[0]}")
 
             try:
-                # 1. Receive Size
                 len_bytes = self._recv_exact(conn, 4)
                 if not len_bytes: continue
                 payload_size = struct.unpack('>I', len_bytes)[0]
                 print(f"Receiving {payload_size} bytes...")
 
-                # 2. Receive Audio
                 audio_data = self._recv_exact(conn, payload_size)
                 if not audio_data: continue
 
-                # 3. Save WAV
                 temp_file = "temp_input.wav"
                 with wave.open(temp_file, "wb") as wf:
                     wf.setnchannels(CHANNELS)
@@ -114,7 +110,6 @@ class VoiceServer:
                     wf.setframerate(SAMPLE_RATE)
                     wf.writeframes(audio_data)
 
-                # 4. Transcribe (Russian forced)
                 transcript = self.ai.transcribe(temp_file)
                 if not transcript:
                     self._send_response(conn, "...")
@@ -126,7 +121,6 @@ class VoiceServer:
                     self._send_response(conn, "Отключаюсь.")
                     break
 
-                # 5. Generate Response
                 response_text = self.ai.ask_gpt(transcript)
                 print(f"Response: {response_text}")
 

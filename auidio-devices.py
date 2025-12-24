@@ -1,50 +1,23 @@
-"""
-List all available audio devices on Raspberry Pi
-Run this to find your microphone device index
-"""
-
-import pyaudio
-import warnings
+# test_audio.py
+import asyncio
+import edge_tts
 import os
+import subprocess
 
-# Suppress ALSA warnings
-os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
-warnings.filterwarnings('ignore')
+VOICE = "ru-RU-DmitryNeural"
+TEXT = "Проверка аудиосистемы. Я готова к работе."
 
-# Redirect ALSA errors to null
-from ctypes import *
+async def main():
+    print("Генерация аудио...")
+    communicate = edge_tts.Communicate(TEXT, VOICE)
+    await communicate.save("test.mp3")
 
-ERROR_HANDLER_FUNC = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)
+    if os.path.exists("test.mp3"):
+        print("Воспроизведение через mpg123...")
+        # Флаг -f 32768 увеличивает скейлинг амплитуды (громкость)
+        subprocess.run(['mpg123', '-f', '32768', 'test.mp3'])
+    else:
+        print("ОШИБКА: Файл не создан.")
 
-
-def py_error_handler(filename, line, function, err, fmt):
-    pass
-
-
-c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
-try:
-    asound = cdll.LoadLibrary('libasound.so.2')
-    asound.snd_lib_error_set_handler(c_error_handler)
-except:
-    pass
-
-print("Available Audio Devices:")
-print("=" * 50)
-
-audio = pyaudio.PyAudio()
-
-for i in range(audio.get_device_count()):
-    info = audio.get_device_info_by_index(i)
-
-    # Only show input devices
-    if info['maxInputChannels'] > 0:
-        print(f"\nDevice {i}: {info['name']}")
-        print(f"  Channels: {info['maxInputChannels']}")
-        print(f"  Sample Rate: {int(info['defaultSampleRate'])} Hz")
-        print(f"  Host API: {audio.get_host_api_info_by_index(info['hostApi'])['name']}")
-
-audio.terminate()
-
-print("\n" + "=" * 50)
-print("\nTo use a device, set INPUT_DEVICE_INDEX in client_improved.py")
-print("Example: INPUT_DEVICE_INDEX = 2")
+if __name__ == "__main__":
+    asyncio.run(main())
