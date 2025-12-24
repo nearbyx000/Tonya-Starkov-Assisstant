@@ -13,9 +13,9 @@ from scipy import signal
 from ctypes import CFUNCTYPE, c_char_p, c_int, cdll
 
 CONFIG = {
-    'SERVER_IP': "192.168.3.115",
+    'SERVER_IP': "192.168.3.115",  # Убедитесь, что IP верный
     'SERVER_PORT': 5000,
-    'VOICE': "ru-RU-DmitryNeural",
+    'VOICE': "ru-RU-SvetlanaNeural",  # Используем проверенный голос
     'RATE': 16000,
     'CHUNK': 1024,
     'DURATION': 5,
@@ -111,25 +111,27 @@ class VoiceClient:
         print(f">>> {text}")
         output_file = "response.mp3"
         try:
-            # Generate MP3
             communicate = edge_tts.Communicate(text, CONFIG['VOICE'])
             await communicate.save(output_file)
 
-            # Play MP3 if generation succeeded
             if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+                # -q подавляет вывод, уберите, если хотите видеть логи плеера
                 subprocess.run(['mpg123', '-q', output_file], check=False)
             else:
-                print("[TTS] Error: File generation failed.")
+                print("[TTS] Error: File is empty.")
 
         except Exception as e:
-            print(f"[TTS] Error: {e}")
+            print(f"[TTS] Critical Error: {e}")
 
     def run(self):
         print(f"--- Client Ready ({CONFIG['SERVER_IP']}) ---")
         try:
             while True:
-                if (resp := self.send(self.record())):
-                    asyncio.run(self.speak(resp))
+                audio_data = self.record()
+                if audio_data:
+                    resp = self.send(audio_data)
+                    if resp:
+                        asyncio.run(self.speak(resp))
                 time.sleep(0.5)
         except KeyboardInterrupt:
             pass
