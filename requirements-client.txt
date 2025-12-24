@@ -1,7 +1,6 @@
-SpeechRecognition
-edge-tts
-pygame
 PyAudio
+edge-tts
 noisereduce
 webrtcvad-wheels
 scipy
+numpy
