@@ -12,7 +12,7 @@ import webrtcvad
 import edge_tts
 from scipy import signal
 
-SERVER_IP = "192.168.3.115"
+SERVER_IP = "100.0.0.2"
 SERVER_PORT = 5000
 VOICE = "ru-RU-SvetlanaNeural"
 RATE = 16000
