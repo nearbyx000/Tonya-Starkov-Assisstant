@@ -11,7 +11,7 @@ import subprocess
 import time
 
 # Configuration
-PC_SERVER_IP = "192.168.3.10"  # Change to your PC IP
+PC_SERVER_IP = "192.168.3.115"  # Change to your PC IP
 PC_SERVER_PORT = 5000
 VOICE = "ru-RU-DmitryNeural"
 SAMPLE_RATE = 16000
