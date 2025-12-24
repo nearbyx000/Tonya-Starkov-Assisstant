@@ -17,7 +17,7 @@ VOICE = "ru-RU-DmitryNeural"
 SAMPLE_RATE = 16000
 CHUNK_SIZE = 1024
 RECORD_SECONDS = 5
-INPUT_DEVICE_INDEX = None  # None = default, or set to specific device
+INPUT_DEVICE_INDEX = 4  # None = default, or set to specific device
 
 
 # Audio Preprocessor
