@@ -3,6 +3,7 @@ import asyncio
 import subprocess
 import time
 import os
+import sys
 import contextlib
 import numpy as np
 import pyaudio
@@ -10,35 +11,33 @@ import noisereduce as nr
 import webrtcvad
 import edge_tts
 from scipy import signal
-from ctypes import CFUNCTYPE, c_char_p, c_int, cdll
 
 SERVER_IP = "192.168.3.115"
 SERVER_PORT = 5000
 VOICE = "ru-RU-SvetlanaNeural"
 RATE = 16000
 CHUNK = 1024
-VAD_LEVEL = 2
-HP_FREQ = 300
 
 
 @contextlib.contextmanager
-def ignore_alsa_warnings():
-    try:
-        handler = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)(lambda *args: None)
-        asound = cdll.LoadLibrary('libasound.so.2')
-        asound.snd_lib_error_set_handler(handler)
-        yield
-        asound.snd_lib_error_set_handler(None)
-    except:
-        yield
+def suppress_stderr():
+    with open(os.devnull, 'w') as devnull:
+        old_stderr = os.dup(sys.stderr.fileno())
+        sys.stderr.flush()
+        os.dup2(devnull.fileno(), sys.stderr.fileno())
+        try:
+            yield
+        finally:
+            os.dup2(old_stderr, sys.stderr.fileno())
+            os.close(old_stderr)
 
 
 class Client:
     def __init__(self):
-        self.vad = webrtcvad.Vad(VAD_LEVEL)
-        self.sos = signal.butter(4, HP_FREQ, 'hp', fs=RATE, output='sos')
+        self.vad = webrtcvad.Vad(2)
+        self.sos = signal.butter(4, 300, 'hp', fs=RATE, output='sos')
 
-    def process_audio(self, raw):
+    def process(self, raw):
         if not raw: return None
         audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
         if (m := np.max(np.abs(audio))) > 0: audio /= m
@@ -51,18 +50,18 @@ class Client:
 
     def record(self):
         print("\n[*] Rec...", end=' ', flush=True)
-        with ignore_alsa_warnings():
+        with suppress_stderr():
             p = pyaudio.PyAudio()
+
         try:
-            dev_idx = p.get_default_input_device_info()['index']
+            idx = p.get_default_input_device_info()['index']
             for i in range(p.get_host_api_info_by_index(0)['deviceCount']):
-                d = p.get_device_info_by_index(i)
-                if d['maxInputChannels'] > 0 and 'USB' in d['name']:
-                    dev_idx = i
+                if 'USB' in p.get_device_info_by_index(i)['name']:
+                    idx = i
                     break
 
             stream = p.open(format=pyaudio.paInt16, channels=1, rate=RATE,
-                            input=True, input_device_index=dev_idx, frames_per_buffer=CHUNK)
+                            input=True, input_device_index=idx, frames_per_buffer=CHUNK)
 
             frames = []
             for _ in range(0, int(RATE / CHUNK * 5)):
@@ -74,16 +73,15 @@ class Client:
             stream.stop_stream()
             stream.close()
             print("Done.")
-            return self.process_audio(b''.join(frames))
-        except Exception as e:
-            print(f"[Rec Error] {e}")
+            return self.process(b''.join(frames))
+        except:
             return None
         finally:
             p.terminate()
 
     def send(self, data):
         try:
-            with socket.create_connection((SERVER_IP, SERVER_PORT), timeout=10) as s:
+            with socket.create_connection((SERVER_IP, SERVER_PORT), timeout=60) as s:
                 s.sendall(len(data).to_bytes(4, 'big') + data)
                 l = int.from_bytes(s.recv(4), 'big')
                 return s.recv(l).decode('utf-8')
@@ -94,21 +92,20 @@ class Client:
     async def speak(self, text):
         if not text: return
         print(f">>> {text}")
-        f = "response.mp3"
+        f = "r.mp3"
         if os.path.exists(f): os.remove(f)
         try:
             await edge_tts.Communicate(text, VOICE).save(f)
-            if os.path.exists(f):
-                subprocess.run(['mpg123', f])
-        except Exception as e:
-            print(f"[TTS Error] {e}")
+            if os.path.exists(f): subprocess.run(['mpg123', f])
+        except:
+            pass
 
     def run(self):
         print(f"--- Client {SERVER_IP} ---")
         while True:
             try:
                 data = self.record()
-                time.sleep(1.0)
+                time.sleep(0.5)
                 if data:
                     resp = self.send(data)
                     if resp:
@@ -116,7 +113,7 @@ class Client:
                         time.sleep(0.5)
             except KeyboardInterrupt:
                 break
-            except Exception:
+            except:
                 time.sleep(1)
 
 
