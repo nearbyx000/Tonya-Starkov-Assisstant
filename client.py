@@ -1,214 +1,141 @@
-
 import socket
-import pyaudio
-import numpy as np
-import noisereduce as nr
-import webrtcvad
-from scipy import signal
 import asyncio
-import edge_tts
 import subprocess
 import time
+import contextlib
+import numpy as np
+import pyaudio
+import noisereduce as nr
+import webrtcvad
+import edge_tts
+from scipy import signal
+from ctypes import CFUNCTYPE, c_char_p, c_int, cdll
 
-# Configuration
-PC_SERVER_IP = "192.168.3.115"  # Change to your PC IP
-PC_SERVER_PORT = 5000
-VOICE = "ru-RU-DmitryNeural"
-SAMPLE_RATE = 16000
-CHUNK_SIZE = 1024
-RECORD_SECONDS = 5
-INPUT_DEVICE_INDEX = 4  # None = default, or set to specific device
-
-
-# Audio Preprocessor
-class AudioPreprocessor:
-
-
-    def __init__(self, sample_rate=16000):
-        self.sample_rate = sample_rate
-        self.vad = webrtcvad.Vad(2)  # Aggressiveness: 0-3
-
-    def preprocess(self, audio_data):
-        """Complete audio preprocessing pipeline"""
-        # 1. Normalize
-        if np.max(np.abs(audio_data)) > 0:
-            audio_data = audio_data / np.max(np.abs(audio_data))
-
-        # 2. High-pass filter (removes low-frequency noise like hum)
-        audio_data = self._highpass_filter(audio_data)
-
-        # 3. Noise reduction
-        audio_data = nr.reduce_noise(
-            y=audio_data,
-            sr=self.sample_rate,
-            stationary=True,  # Set False for non-stationary noise
-            prop_decrease=0.8
-        )
-
-        # 4. Voice Activity Detection
-        audio_data = self._apply_vad(audio_data)
-
-        return audio_data
-
-    def _highpass_filter(self, audio):
-        """Remove frequencies below 300Hz"""
-        sos = signal.butter(4, 300, 'hp', fs=self.sample_rate, output='sos')
-        return signal.sosfilt(sos, audio)
-
-    def _apply_vad(self, audio):
-        """Extract only speech segments"""
-        frame_duration = 30  # ms
-        frame_size = int(self.sample_rate * frame_duration / 1000)
-
-        speech_frames = []
-        for i in range(0, len(audio) - frame_size, frame_size):
-            frame = audio[i:i + frame_size]
-
-            # Convert to int16 for VAD
-            frame_int16 = (frame * 32767).astype(np.int16)
-            frame_bytes = frame_int16.tobytes()
-
-            # Check if speech
-            try:
-                if self.vad.is_speech(frame_bytes, self.sample_rate):
-                    speech_frames.append(frame)
-            except:
-                # If VAD fails, keep the frame
-                speech_frames.append(frame)
-
-        if speech_frames:
-            return np.concatenate(speech_frames)
-        return audio
+CONFIG = {
+    'SERVER_IP': "192.168.3.115",
+    'SERVER_PORT': 5000,
+    'VOICE': "ru-RU-DmitryNeural",
+    'RATE': 16000,
+    'CHUNK': 1024,
+    'DURATION': 5,
+    'VAD_LEVEL': 2,  # 0-3
+    'HP_FREQ': 300
+}
 
 
-# Client Class
-class VoiceAssistantClient:
-    """Improved client with noise cancellation"""
+@contextlib.contextmanager
+def ignore_alsa_warnings():
+    """Suppresses low-level ALSA driver warnings."""
+    handler = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)(lambda *args: None)
+    asound = cdll.LoadLibrary('libasound.so.2')
+    asound.snd_lib_error_set_handler(handler)
+    yield
+    asound.snd_lib_error_set_handler(None)
 
-    def __init__(self):
-        self.preprocessor = AudioPreprocessor(SAMPLE_RATE)
-        self.audio = pyaudio.PyAudio()
-        self.is_speaking = False
 
-    def capture_audio(self):
-        """Capture audio from microphone with preprocessing"""
-        print("Listening...")
+class AudioProcessor:
+    def __init__(self, rate):
+        self.rate = rate
+        self.vad = webrtcvad.Vad(CONFIG['VAD_LEVEL'])
+        self.sos = signal.butter(4, CONFIG['HP_FREQ'], 'hp', fs=rate, output='sos')
 
-        stream = self.audio.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=SAMPLE_RATE,
-            input=True,
-            input_device_index=INPUT_DEVICE_INDEX,
-            frames_per_buffer=CHUNK_SIZE
-        )
+    def clean(self, raw_bytes):
+        audio = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
-        frames = []
-        for _ in range(0, int(SAMPLE_RATE / CHUNK_SIZE * RECORD_SECONDS)):
-            try:
-                data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
-                frames.append(data)
-            except IOError as e:
-                print(f"Warning: {e}")
-                continue
+        # Normalize and Filter
+        if (max_val := np.max(np.abs(audio))) > 0:
+            audio /= max_val
+        audio = signal.sosfilt(self.sos, audio)
 
-        stream.stop_stream()
-        stream.close()
-
-        # Convert to numpy array
-        audio_data = np.frombuffer(b''.join(frames), dtype=np.int16)
-        audio_float = audio_data.astype(np.float32) / 32768.0
-
-        print("Preprocessing audio...")
-
-        # Apply preprocessing (noise reduction + VAD)
-        clean_audio = self.preprocessor.preprocess(audio_float)
-
-        # Convert back to int16
-        clean_int16 = (clean_audio * 32767).astype(np.int16)
-
-        return clean_int16.tobytes()
-
-    def send_to_server(self, audio_bytes):
-        """Send audio to server and get response"""
+        # Noise Reduction
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect((PC_SERVER_IP, PC_SERVER_PORT))
+            audio = nr.reduce_noise(y=audio, sr=self.rate, stationary=True, prop_decrease=0.75, n_fft=1024)
+        except Exception:
+            pass
 
-            # Send audio size first
-            size = len(audio_bytes)
-            sock.sendall(size.to_bytes(4, 'big'))
+        return self._extract_speech(audio)
 
-            # Send audio data
-            sock.sendall(audio_bytes)
+    def _extract_speech(self, audio):
+        frame_size = int(self.rate * 0.03)  # 30ms window
+        frames = []
 
-            # Receive response
-            response_size = int.from_bytes(sock.recv(4), 'big')
-            response_text = sock.recv(response_size).decode('utf-8')
+        for i in range(0, len(audio) - frame_size, frame_size):
+            chunk = audio[i:i + frame_size]
+            # VAD requires int16
+            if self.vad.is_speech((chunk * 32767).astype(np.int16).tobytes(), self.rate):
+                frames.append(chunk)
 
-            sock.close()
+        result = np.concatenate(frames) if frames else audio
+        return (result * 32767).astype(np.int16).tobytes()
 
-            return response_text
 
+class VoiceClient:
+    def __init__(self):
+        self.processor = AudioProcessor(CONFIG['RATE'])
+        with ignore_alsa_warnings():
+            self.pa = pyaudio.PyAudio()
+        self.device_idx = self._find_mic()
+
+    def _find_mic(self):
+        """Auto-detect USB mic or fallback to default."""
+        for i in range(self.pa.get_host_api_info_by_index(0)['deviceCount']):
+            dev = self.pa.get_device_info_by_index(i)
+            if dev['maxInputChannels'] > 0 and 'USB' in dev['name']:
+                print(f"[Init] USB Mic detected: {dev['name']}")
+                return i
+        return self.pa.get_default_input_device_info()['index']
+
+    def record(self):
+        print("[*] Listening...", end=' ', flush=True)
+        try:
+            stream = self.pa.open(
+                format=pyaudio.paInt16, channels=1, rate=CONFIG['RATE'],
+                input=True, input_device_index=self.device_idx,
+                frames_per_buffer=CONFIG['CHUNK']
+            )
+            frames = [stream.read(CONFIG['CHUNK'], exception_on_overflow=False)
+                      for _ in range(0, int(CONFIG['RATE'] / CONFIG['CHUNK'] * CONFIG['DURATION']))]
+            stream.stop_stream()
+            stream.close()
+            print("Done.")
+            return self.processor.clean(b''.join(frames))
+        except OSError:
+            print("\n[Error] Audio device failure. Reinitializing...")
+            self.device_idx = self._find_mic()
+            return None
+
+    def send(self, audio):
+        if not audio: return None
+        try:
+            with socket.create_connection((CONFIG['SERVER_IP'], CONFIG['SERVER_PORT']), timeout=5) as sock:
+                sock.sendall(len(audio).to_bytes(4, 'big') + audio)
+                resp_len = int.from_bytes(sock.recv(4), 'big')
+                return sock.recv(resp_len).decode('utf-8')
         except Exception as e:
-            print(f"Server error: {e}")
+            print(f"[Network] Error: {e}")
             return None
 
     async def speak(self, text):
-        """Speak text using Edge-TTS"""
-        self.is_speaking = True
-        print(f"Speaking: {text}")
-
+        if not text: return
+        print(f">>> {text}")
         try:
-            communicate = edge_tts.Communicate(text, VOICE)
-            await communicate.save("response.mp3")
-
-            # Play audio
-            subprocess.run(['mpg123', '-q', 'response.mp3'])
-
+            await edge_tts.Communicate(text, CONFIG['VOICE']).save("response.mp3")
+            subprocess.run(['mpg123', '-q', 'response.mp3'], check=False)
         except Exception as e:
-            print(f"TTS error: {e}")
-
-        finally:
-            self.is_speaking = False
-            time.sleep(0.5)  # Buffer clearing delay
+            print(f"[TTS] Error: {e}")
 
     def run(self):
-        """Main loop"""
-        print("=" * 50)
-        print("Tonya-Starkov Assistant (IMPROVED)")
-        print("=" * 50)
-        print(f"Server: {PC_SERVER_IP}:{PC_SERVER_PORT}")
-        print(f"Voice: {VOICE}")
-        print("=" * 50)
-
-        while True:
-            try:
-                # Capture audio
-                audio_data = self.capture_audio()
-
-                # Send to server
-                print("Sending to server...")
-                response = self.send_to_server(audio_data)
-
-                if response:
-                    print(f"Response: {response}")
-                    asyncio.run(self.speak(response))
-                else:
-                    print("No response from server")
-
-                print("\n" + "-" * 50 + "\n")
-
-            except KeyboardInterrupt:
-                print("\nShutting down...")
-                break
-            except Exception as e:
-                print(f"Error: {e}")
-                time.sleep(1)
-
-        self.audio.terminate()
+        print(f"--- Client Ready ({CONFIG['SERVER_IP']}) ---")
+        try:
+            while True:
+                if (resp := self.send(self.record())):
+                    asyncio.run(self.speak(resp))
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.pa.terminate()
 
 
-# Main
 if __name__ == "__main__":
-    client = VoiceAssistantClient()
+    VoiceClient().run()
